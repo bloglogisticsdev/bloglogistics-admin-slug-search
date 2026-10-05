@@ -2,8 +2,8 @@
 /**
  * Plugin Name: BlogLogistics Admin Slug Search
  * Plugin URI: https://www.bloglogistics.com
- * Description: When a page or post title differs from its URL slug, this plugin makes it easy to find and then edit it in the wp-admin backend by adding URL slug matching to the Posts and Pages listing searches.
- * Version: 1.0.5
+ * Description: Find content in wp-admin by slug or pasted URL, with configurable content types, slug matching and an optional Slug column.
+ * Version: 1.1.0
  * Requires at least: 7.1
  * Requires PHP: 8.3
  * Author: BlogLogistics
@@ -28,7 +28,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'BLOGLOGISTICS_ASS_VERSION', '1.0.5' );
+define( 'BLOGLOGISTICS_ASS_VERSION', '1.1.0' );
 define( 'BLOGLOGISTICS_ASS_SLUG', 'bloglogistics-admin-slug-search' );
 define( 'BLOGLOGISTICS_ASS_FILE', __FILE__ );
 define( 'BLOGLOGISTICS_ASS_DIR', plugin_dir_path( __FILE__ ) );
@@ -50,8 +50,32 @@ if ( file_exists( $bloglogistics_ass_puc ) ) {
 }
 
 
+require_once BLOGLOGISTICS_ASS_DIR . 'includes/class-bloglogistics-admin-slug-search-admin.php';
+BlogLogistics_Admin_Slug_Search_Admin::init();
+
 /**
- * Add slug matching only to the main Posts and Pages admin listing search.
+ * Extract the final slug from an HTTP(S) URL without fetching it.
+ *
+ * @return string|null Null for ordinary text; empty string for a URL without a slug.
+ */
+function bloglogistics_ass_url_slug( $term ) {
+    $term = trim( $term );
+    if ( ! preg_match( '~^https?://~i', $term ) ) {
+        return null;
+    }
+    $parts = wp_parse_url( $term );
+    if ( ! is_array( $parts ) || empty( $parts['host'] ) ) {
+        return '';
+    }
+    $path = rtrim( $parts['path'] ?? '', '/' );
+    if ( '' === $path ) {
+        return '';
+    }
+    return sanitize_title( rawurldecode( basename( $path ) ) );
+}
+
+/**
+ * Add slug matching only to the main enabled content-type admin listing search.
  *
  * @param string   $search Existing search WHERE fragment.
  * @param WP_Query $query  Current query.
@@ -64,11 +88,12 @@ function bloglogistics_admin_slug_search( $search, $query ) {
 	}
 
 	$screen = get_current_screen();
-	if ( ! $screen || 'edit' !== $screen->base || ! in_array( $screen->post_type, array( 'post', 'page' ), true ) ) {
+	$settings = BlogLogistics_Admin_Slug_Search_Admin::settings();
+	if ( ! $screen || 'edit' !== $screen->base || ! in_array( $screen->post_type, $settings['post_types'], true ) ) {
 		return $search;
 	}
 
-	if ( ! in_array( $query->get( 'post_type' ) ?: 'post', array( 'post', 'page' ), true ) ) {
+	if ( ! in_array( $query->get( 'post_type' ) ?: 'post', $settings['post_types'], true ) ) {
 		return $search;
 	}
 
@@ -77,17 +102,23 @@ function bloglogistics_admin_slug_search( $search, $query ) {
 		return $search;
 	}
 
+	$url_slug = bloglogistics_ass_url_slug( $term );
+	if ( '' === $url_slug ) {
+		return $search;
+	}
+
 	// Leave advanced exclusion searches to WordPress, preserving their meaning.
 	$exclusion_prefix = apply_filters( 'wp_query_search_exclusion_prefix', '-' );
-	foreach ( (array) $query->get( 'search_terms' ) as $search_term ) {
+	foreach ( null === $url_slug ? (array) $query->get( 'search_terms' ) : array() as $search_term ) {
 		if ( $exclusion_prefix && str_starts_with( $search_term, $exclusion_prefix ) ) {
 			return $search;
 		}
 	}
 
 	global $wpdb;
-	$slug = $wpdb->esc_like( trim( $term ) );
-	if ( ! $query->get( 'exact' ) ) {
+	$slug = $wpdb->esc_like( null === $url_slug ? trim( $term ) : $url_slug );
+	$exact = $query->get( 'exact' ) || 'exact' === $settings['matching'] || ( 'smart' === $settings['matching'] && null !== $url_slug );
+	if ( ! $exact ) {
 		$slug = '%' . $slug . '%';
 	}
 	$slug_search = $wpdb->prepare( "{$wpdb->posts}.post_name LIKE %s", $slug );
